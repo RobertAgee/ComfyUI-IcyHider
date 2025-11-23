@@ -12,6 +12,7 @@ A ComfyUI custom node extension that hides image previews until you hover over t
 - **🎨 Enhanced Customization**: More control over your workflow's appearance
 
 ## Features
+<img width="2202" height="1101" alt="image" src="https://github.com/user-attachments/assets/6b31c475-fd5a-411b-bb1b-fbe61fe5fbbb" />
 
 - **Auto-hide on mouse leave**: Images are automatically hidden when your mouse is not hovering over the node
 - **Two hiding modes**: Choose between stylish cover overlay or subtle blur effect
@@ -100,4 +101,5 @@ MIT License
 ## Credits
 
 Created for ComfyUI
+
 
