@@ -28,7 +28,7 @@ Documentation = "https://github.com/icekiub-ai/ComfyUI-IcyHider/wiki"
 "Bug Tracker" = "https://github.com/icekiub-ai/ComfyUI-IcyHider/issues"
 
 [tool.comfy]
-PublisherId = ""
+PublisherId = "icekiub"
 DisplayName = "ComfyUI-IcyHider"
 Icon = ""
 includes = [] 
