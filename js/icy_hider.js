@@ -1,17 +1,52 @@
 import { app } from "../../scripts/app.js";
 
+// Cache for settings to avoid repeated lookups
+let settingsCache = {
+    avalanche: true,
+    hideMode: "cover",
+    blurAmount: 20,
+    gradientStart: "1E3C72",
+    gradientEnd: "2A5298",
+    borderColor: "A5DEE5",
+    icon: "❄️",
+    text: "FROZEN",
+    textColor: "E0F7FA",
+    dirty: true
+};
+
+// Refresh settings cache (call sparingly)
+function refreshSettingsCache() {
+    if (!settingsCache.dirty) return;
+    settingsCache.avalanche = app.ui.settings.getSettingValue("IcyHider.Avalanche", true);
+    settingsCache.hideMode = app.ui.settings.getSettingValue("IcyHider.HideMode", "cover");
+    settingsCache.blurAmount = app.ui.settings.getSettingValue("IcyHider.BlurAmount", 20);
+    settingsCache.gradientStart = app.ui.settings.getSettingValue("IcyHider.GradientStart", "1E3C72") || "1E3C72";
+    settingsCache.gradientEnd = app.ui.settings.getSettingValue("IcyHider.GradientEnd", "2A5298") || "2A5298";
+    settingsCache.borderColor = app.ui.settings.getSettingValue("IcyHider.BorderColor", "A5DEE5") || "A5DEE5";
+    settingsCache.icon = app.ui.settings.getSettingValue("IcyHider.Icon", "❄️") || "❄️";
+    settingsCache.text = app.ui.settings.getSettingValue("IcyHider.Text", "FROZEN") || "FROZEN";
+    settingsCache.textColor = app.ui.settings.getSettingValue("IcyHider.TextColor", "E0F7FA") || "E0F7FA";
+    settingsCache.dirty = false;
+}
+
+function markSettingsDirty() {
+    settingsCache.dirty = true;
+}
+
 // Check if a node is "Icy" by checking if its class name starts with "Icy"
 function isIcyNode(node) {
     return node.comfyClass && node.comfyClass.startsWith("Icy");
 }
 
 // Single source of truth: should this node be hidden right now?
+// This is called during draw, so it checks current state directly
 function computeHiddenForNode(node) {
-    const Avalanche = app.ui.settings.getSettingValue("IcyHider.Avalanche", true);
-    
-    if (Avalanche) {
+    if (settingsCache.avalanche) {
         // Avalanche ON: All nodes hidden unless selected
-        return !node.selected;
+        // Check is_selected which is more reliable than selected property
+        const isSelected = node.is_selected || node.selected || 
+            (app.canvas && app.canvas.selected_nodes && app.canvas.selected_nodes[node.id]);
+        return !isSelected;
     } else {
         // Avalanche OFF: Only Icy nodes hidden, and only if not hovered
         if (isIcyNode(node)) {
@@ -21,17 +56,25 @@ function computeHiddenForNode(node) {
     }
 }
 
-function updateNodeHidden(node) {
-    node.icy_should_be_hidden = computeHiddenForNode(node);
-    node.icy_hidden = node.icy_should_be_hidden;
-    updateNodeDOMElements(node, node.icy_hidden);
+// Update hidden state - returns true if changed
+function updateNodeHidden(node, skipDOMUpdate = false) {
+    const newHidden = computeHiddenForNode(node);
+    // Only update if state actually changed
+    if (node.icy_hidden === newHidden) return false;
+    
+    node.icy_hidden = newHidden;
+    if (!skipDOMUpdate) {
+        updateNodeDOMElements(node, node.icy_hidden);
+    }
+    return true;
 }
 
-function updateAllNodes() {
-    if (!app.graph || !app.graph._nodes) return;
-    app.graph._nodes.forEach(updateNodeHidden);
-    if (app.canvas) {
-        app.canvas.setDirty(true, true);
+// Sync hidden state during draw (cheap check)
+function syncHiddenState(node) {
+    const newHidden = computeHiddenForNode(node);
+    if (node.icy_hidden !== newHidden) {
+        node.icy_hidden = newHidden;
+        updateNodeDOMElements(node, newHidden);
     }
 }
 
@@ -71,19 +114,20 @@ function isAnimatedMediaElement(element) {
 function updateNodeDOMElements(node, hide) {
     if (!node.widgets) return;
     
-    node.widgets.forEach(widget => {
+    const hideMode = settingsCache.hideMode;
+    const blurAmount = settingsCache.blurAmount;
+    
+    for (let i = 0; i < node.widgets.length; i++) {
+        const widget = node.widgets[i];
         // Find the actual DOM element for this widget
         const element = widget.inputEl || widget.element;
-        if (!element) return;
-        
-        const globalHideMode = app.ui.settings.getSettingValue("IcyHider.HideMode", "cover");
+        if (!element) continue;
 
         // Animated media (video, gif, apng, avif, etc) is ALWAYS covered,
         // even if the global mode is "blur".
-        const effectiveMode = isAnimatedMediaElement(element) ? "cover" : globalHideMode;
+        const effectiveMode = isAnimatedMediaElement(element) ? "cover" : hideMode;
         
         if (hide && effectiveMode === "blur") {
-            const blurAmount = app.ui.settings.getSettingValue("IcyHider.BlurAmount", 20);
             element.style.filter = `blur(${blurAmount}px)`;
             element.style.opacity = "1";
             element.style.pointerEvents = "none";
@@ -99,14 +143,18 @@ function updateNodeDOMElements(node, hide) {
             element.style.pointerEvents = "auto";
             element.style.userSelect = "auto";
         }
-    });
+    }
 }
 
 
 
 // Show confirmation dialog for reload
 function showReloadDialog() {
+    // Prevent multiple dialogs
+    if (document.getElementById("icy-reload-dialog")) return;
+    
     const dialog = document.createElement("div");
+    dialog.id = "icy-reload-dialog";
     dialog.style.cssText = `
         position: fixed;
         top: 50%;
@@ -169,6 +217,7 @@ app.registerExtension({
             defaultValue: true,
             tooltip: "When ON: all nodes hidden until selected. When OFF: only Icy nodes hidden, revealed on hover.",
             onChange: (newVal, oldVal) => {
+                markSettingsDirty();
                 // Only show dialog if this is an actual user change, not initial load
                 if (oldVal !== undefined && oldVal !== newVal) {
                     showReloadDialog();
@@ -182,7 +231,8 @@ app.registerExtension({
             defaultValue: "cover",
             options: ["cover", "blur"],
             tooltip: "Choose between cover overlay or blur effect.",
-			onChange: (newVal, oldVal) => {
+            onChange: (newVal, oldVal) => {
+                markSettingsDirty();
                 // Only show dialog if this is an actual user change, not initial load
                 if (oldVal !== undefined && oldVal !== newVal) {
                     showReloadDialog();
@@ -199,49 +249,56 @@ app.registerExtension({
                 max: 50,
                 step: 1
             },
-            tooltip: "Amount of blur to apply (0-50px). Only applies when Hide Mode is 'blur'."
+            tooltip: "Amount of blur to apply (0-50px). Only applies when Hide Mode is 'blur'.",
+            onChange: () => markSettingsDirty()
         },
         {
             id: "IcyHider.GradientStart",
             name: "Gradient Start Color",
             type: "color",
             defaultValue: "1E3C72",
-            tooltip: "The starting color of the gradient background (cover mode only)."
+            tooltip: "The starting color of the gradient background (cover mode only).",
+            onChange: () => markSettingsDirty()
         },
         {
             id: "IcyHider.GradientEnd",
             name: "Gradient End Color",
             type: "color",
             defaultValue: "2A5298",
-            tooltip: "The ending color of the gradient background (cover mode only)."
+            tooltip: "The ending color of the gradient background (cover mode only).",
+            onChange: () => markSettingsDirty()
         },
         {
             id: "IcyHider.BorderColor",
             name: "Border Color",
             type: "color",
             defaultValue: "A5DEE5",
-            tooltip: "The color of the border around the cover (cover mode only)."
+            tooltip: "The color of the border around the cover (cover mode only).",
+            onChange: () => markSettingsDirty()
         },
         {
             id: "IcyHider.Icon",
             name: "Icon",
             type: "text",
             defaultValue: "❄️",
-            tooltip: "The emoji or text icon to display (cover mode only)."
+            tooltip: "The emoji or text icon to display (cover mode only).",
+            onChange: () => markSettingsDirty()
         },
         {
             id: "IcyHider.Text",
             name: "Text",
             type: "text",
             defaultValue: "FROZEN",
-            tooltip: "The text to display below the icon (cover mode only)."
+            tooltip: "The text to display below the icon (cover mode only).",
+            onChange: () => markSettingsDirty()
         },
         {
             id: "IcyHider.TextColor",
             name: "Text Color",
             type: "color",
             defaultValue: "E0F7FA",
-            tooltip: "The color of the text and icon (cover mode only)."
+            tooltip: "The color of the text and icon (cover mode only).",
+            onChange: () => markSettingsDirty()
         }
     ],
 
@@ -249,50 +306,40 @@ app.registerExtension({
         // Initialize hover state
         node.icy_is_hovered = false;
         
+        // Ensure settings are loaded
+        refreshSettingsCache();
+        
         // Initial hidden state when node appears
-        updateNodeHidden(node);
-
-        // Store original selected state
-        let wasSelected = false;
+        node.icy_hidden = computeHiddenForNode(node);
 
         // Override onSelected - This gets called when node is selected
         const origOnSelected = node.onSelected;
         node.onSelected = function () {
-            wasSelected = true;
-            this.selected = true;
-            updateNodeHidden(this);
-            this.setDirtyCanvas(true, true);
+            refreshSettingsCache();
+            if (updateNodeHidden(this)) {
+                this.setDirtyCanvas(true, true);
+            }
             if (origOnSelected) origOnSelected.apply(this, arguments);
         };
 
         // Override onDeselected - This gets called when node is deselected
         const origOnDeselected = node.onDeselected;
         node.onDeselected = function () {
-            wasSelected = false;
-            this.selected = false;
-            updateNodeHidden(this);
-            this.setDirtyCanvas(true, true);
+            refreshSettingsCache();
+            if (updateNodeHidden(this)) {
+                this.setDirtyCanvas(true, true);
+            }
             if (origOnDeselected) origOnDeselected.apply(this, arguments);
         };
-
-        // Also monitor the selected property directly in case callbacks aren't fired
-        const checkSelectionState = () => {
-            if (node.selected !== wasSelected) {
-                wasSelected = node.selected;
-                updateNodeHidden(node);
-                node.setDirtyCanvas(true, true);
-            }
-        };
-
-        // Check selection state periodically as a fallback
-        setInterval(checkSelectionState, 100);
 
         // Override onMouseEnter for hover detection
         const origOnMouseEnter = node.onMouseEnter;
         node.onMouseEnter = function (e) {
             this.icy_is_hovered = true;
-            updateNodeHidden(this);
-            this.setDirtyCanvas(true, true);
+            refreshSettingsCache();
+            if (updateNodeHidden(this)) {
+                this.setDirtyCanvas(true, true);
+            }
             if (origOnMouseEnter) origOnMouseEnter.apply(this, arguments);
         };
 
@@ -300,8 +347,10 @@ app.registerExtension({
         const origOnMouseLeave = node.onMouseLeave;
         node.onMouseLeave = function (e) {
             this.icy_is_hovered = false;
-            updateNodeHidden(this);
-            this.setDirtyCanvas(true, true);
+            refreshSettingsCache();
+            if (updateNodeHidden(this)) {
+                this.setDirtyCanvas(true, true);
+            }
             if (origOnMouseLeave) origOnMouseLeave.apply(this, arguments);
         };
 
@@ -315,9 +364,7 @@ app.registerExtension({
                 return;
             }
 
-            const hideMode = app.ui.settings.getSettingValue("IcyHider.HideMode", "cover");
-
-            if (hideMode === "blur") {
+            if (settingsCache.hideMode === "blur") {
                 ctx.save();
 
                 const titleHeight = 30;
@@ -325,8 +372,7 @@ app.registerExtension({
                 ctx.rect(0, titleHeight, this.size[0], this.size[1] - titleHeight);
                 ctx.clip();
 
-                const blurAmount = app.ui.settings.getSettingValue("IcyHider.BlurAmount", 20);
-                ctx.filter = `blur(${blurAmount}px)`;
+                ctx.filter = `blur(${settingsCache.blurAmount}px)`;
 
                 if (origDrawWidgets) {
                     origDrawWidgets.apply(this, arguments);
@@ -334,182 +380,209 @@ app.registerExtension({
 
                 ctx.filter = "none";
                 ctx.restore();
-            } else {
-                // cover mode: skip drawing widgets entirely
-                return;
             }
+            // cover mode: skip drawing widgets entirely (implicit return)
         };
 
-        // Override onDrawBackground
-        let originalOnDrawBackground = node.onDrawBackground;
-        Object.defineProperty(node, "onDrawBackground", {
-            get: function () {
-                return function (ctx) {
-                    const hideMode = app.ui.settings.getSettingValue("IcyHider.HideMode", "cover");
+        // Use a symbol to store our wrapper to avoid conflicts with other extensions
+        const icyDrawBgKey = Symbol.for("icy_onDrawBackground");
+        const icyDrawFgKey = Symbol.for("icy_onDrawForeground");
+        
+        // Mark that we've processed this node
+        node[icyDrawBgKey] = true;
+        node[icyDrawFgKey] = true;
 
-                    if (this.icy_hidden && hideMode === "blur") {
-                        const blurAmount = app.ui.settings.getSettingValue("IcyHider.BlurAmount", 20);
-                        ctx.save();
+        // Simple wrapper approach - wrap the function directly without defineProperty
+        const wrapDrawBackground = () => {
+            const currentFn = node.onDrawBackground;
+            // Skip if already our wrapper or no function
+            if (currentFn && currentFn._icyWrapped) return;
+            
+            const wrappedFn = function(ctx) {
+                // Sync hidden state on every draw (cheap check)
+                syncHiddenState(this);
+                
+                if (this.icy_hidden && settingsCache.hideMode === "blur") {
+                    ctx.save();
 
-                        const titleHeight = 30;
-                        ctx.beginPath();
-                        ctx.rect(0, titleHeight, this.size[0], this.size[1] - titleHeight);
-                        ctx.clip();
+                    const titleHeight = 30;
+                    ctx.beginPath();
+                    ctx.rect(0, titleHeight, this.size[0], this.size[1] - titleHeight);
+                    ctx.clip();
 
-                        ctx.filter = `blur(${blurAmount}px)`;
+                    ctx.filter = `blur(${settingsCache.blurAmount}px)`;
 
-                        if (originalOnDrawBackground) {
-                            originalOnDrawBackground.apply(this, arguments);
-                        }
-
-                        ctx.filter = "none";
-                        ctx.restore();
-                    } else {
-                        if (originalOnDrawBackground) {
-                            originalOnDrawBackground.apply(this, arguments);
-                        }
+                    if (currentFn) {
+                        currentFn.apply(this, arguments);
                     }
-                };
-            },
-            set: function (val) {
-                originalOnDrawBackground = val;
-            }
-        });
 
-        // Override onDrawForeground
-        let originalOnDrawForeground = node.onDrawForeground;
-        Object.defineProperty(node, "onDrawForeground", {
-            get: function () {
-                return function (ctx) {
-                    const hideMode = app.ui.settings.getSettingValue("IcyHider.HideMode", "cover");
+                    ctx.filter = "none";
+                    ctx.restore();
+                } else {
+                    if (currentFn) {
+                        currentFn.apply(this, arguments);
+                    }
+                }
+            };
+            wrappedFn._icyWrapped = true;
+            wrappedFn._icyOriginal = currentFn;
+            node.onDrawBackground = wrappedFn;
+        };
 
-                    if (this.icy_hidden && hideMode === "blur") {
-                        const blurAmount = app.ui.settings.getSettingValue("IcyHider.BlurAmount", 20);
-                        ctx.save();
+        const wrapDrawForeground = () => {
+            const currentFn = node.onDrawForeground;
+            // Skip if already our wrapper or no function  
+            if (currentFn && currentFn._icyWrapped) return;
+            
+            const wrappedFn = function(ctx) {
+                if (this.icy_hidden && settingsCache.hideMode === "blur") {
+                    ctx.save();
 
-                        const titleHeight = 30;
-                        ctx.beginPath();
-                        ctx.rect(0, titleHeight, this.size[0], this.size[1] - titleHeight);
-                        ctx.clip();
+                    const titleHeight = 30;
+                    ctx.beginPath();
+                    ctx.rect(0, titleHeight, this.size[0], this.size[1] - titleHeight);
+                    ctx.clip();
 
-                        ctx.filter = `blur(${blurAmount}px)`;
+                    ctx.filter = `blur(${settingsCache.blurAmount}px)`;
 
-                        if (originalOnDrawForeground) {
-                            originalOnDrawForeground.apply(this, arguments);
-                        }
+                    if (currentFn) {
+                        currentFn.apply(this, arguments);
+                    }
 
-                        ctx.filter = "none";
-                        ctx.restore();
-                    } else if (this.icy_hidden && hideMode === "cover") {
-                        if (originalOnDrawForeground) {
-                            originalOnDrawForeground.apply(this, arguments);
-                        }
+                    ctx.filter = "none";
+                    ctx.restore();
+                } else if (this.icy_hidden && settingsCache.hideMode === "cover") {
+                    // In cover mode, still call original first (for any side effects)
+                    if (currentFn) {
+                        currentFn.apply(this, arguments);
+                    }
 
-                        ctx.save();
-                        const titleHeight = 30;
+                    // Then draw cover on top
+                    ctx.save();
+                    const titleHeight = 30;
 
-                        const gradStart =
-                            "#" +
-                            (app.ui.settings.getSettingValue("IcyHider.GradientStart", "1E3C72") ||
-                                "1E3C72");
-                        const gradEnd =
-                            "#" +
-                            (app.ui.settings.getSettingValue("IcyHider.GradientEnd", "2A5298") ||
-                                "2A5298");
-                        const borderColor =
-                            "#" +
-                            (app.ui.settings.getSettingValue("IcyHider.BorderColor", "A5DEE5") ||
-                                "A5DEE5");
-                        const icon =
-                            app.ui.settings.getSettingValue("IcyHider.Icon", "❄️") || "❄️";
-                        const text =
-                            app.ui.settings.getSettingValue("IcyHider.Text", "FROZEN") ||
-                            "FROZEN";
-                        const textColor =
-                            "#" +
-                            (app.ui.settings.getSettingValue("IcyHider.TextColor", "E0F7FA") ||
-                                "E0F7FA");
+                    const gradStart = "#" + settingsCache.gradientStart;
+                    const gradEnd = "#" + settingsCache.gradientEnd;
+                    const borderColor = "#" + settingsCache.borderColor;
+                    const icon = settingsCache.icon;
+                    const text = settingsCache.text;
+                    const textColor = "#" + settingsCache.textColor;
 
-                        const grad = ctx.createLinearGradient(
+                    const grad = ctx.createLinearGradient(
+                        0,
+                        titleHeight,
+                        0,
+                        this.size[1]
+                    );
+                    grad.addColorStop(0, gradStart);
+                    grad.addColorStop(1, gradEnd);
+                    ctx.fillStyle = grad;
+
+                    ctx.beginPath();
+                    if (ctx.roundRect) {
+                        ctx.roundRect(
                             0,
                             titleHeight,
-                            0,
-                            this.size[1]
+                            this.size[0],
+                            this.size[1] - titleHeight,
+                            [0, 0, 10, 10]
                         );
-                        grad.addColorStop(0, gradStart);
-                        grad.addColorStop(1, gradEnd);
-                        ctx.fillStyle = grad;
-
-                        ctx.beginPath();
-                        if (ctx.roundRect) {
-                            ctx.roundRect(
-                                0,
-                                titleHeight,
-                                this.size[0],
-                                this.size[1] - titleHeight,
-                                [0, 0, 10, 10]
-                            );
-                        } else {
-                            ctx.rect(
-                                0,
-                                titleHeight,
-                                this.size[0],
-                                this.size[1] - titleHeight
-                            );
-                        }
-                        ctx.fill();
-
-                        ctx.strokeStyle = borderColor;
-                        ctx.lineWidth = 2;
-                        ctx.stroke();
-
-                        const centerX = this.size[0] / 2;
-                        const centerY = (this.size[1] + titleHeight) / 2;
-
-                        ctx.fillStyle = textColor;
-                        ctx.textAlign = "center";
-                        ctx.textBaseline = "middle";
-
-                        ctx.font = "32px Arial";
-                        ctx.fillText(icon, centerX, centerY - 15);
-
-                        ctx.font = "bold 14px Arial";
-                        ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-                        ctx.shadowBlur = 4;
-                        ctx.fillText(text, centerX, centerY + 15);
-
-                        ctx.restore();
                     } else {
-                        if (originalOnDrawForeground) {
-                            originalOnDrawForeground.apply(this, arguments);
-                        }
+                        ctx.rect(
+                            0,
+                            titleHeight,
+                            this.size[0],
+                            this.size[1] - titleHeight
+                        );
                     }
-                };
-            },
-            set: function (val) {
-                originalOnDrawForeground = val;
+                    ctx.fill();
+
+                    ctx.strokeStyle = borderColor;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    const centerX = this.size[0] / 2;
+                    const centerY = (this.size[1] + titleHeight) / 2;
+
+                    ctx.fillStyle = textColor;
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+
+                    ctx.font = "32px Arial";
+                    ctx.fillText(icon, centerX, centerY - 15);
+
+                    ctx.font = "bold 14px Arial";
+                    ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+                    ctx.shadowBlur = 4;
+                    ctx.fillText(text, centerX, centerY + 15);
+
+                    ctx.restore();
+                } else {
+                    if (currentFn) {
+                        currentFn.apply(this, arguments);
+                    }
+                }
+            };
+            wrappedFn._icyWrapped = true;
+            wrappedFn._icyOriginal = currentFn;
+            node.onDrawForeground = wrappedFn;
+        };
+
+        // Wrap now
+        wrapDrawBackground();
+        wrapDrawForeground();
+        
+        // Re-wrap after a delay to catch late-binding extensions like VHS
+        setTimeout(() => {
+            // Check if someone replaced our wrapper
+            if (!node.onDrawBackground || !node.onDrawBackground._icyWrapped) {
+                wrapDrawBackground();
             }
-        });
+            if (!node.onDrawForeground || !node.onDrawForeground._icyWrapped) {
+                wrapDrawForeground();
+            }
+        }, 100);
     },
 
     async setup() {
-        // Monitor for dynamically created widgets
-        const observer = new MutationObserver((mutations) => {
-            mutations.forEach((mutation) => {
-                mutation.addedNodes.forEach((node) => {
-                    if (node.nodeType === 1 && (node.tagName === 'TEXTAREA' || node.tagName === 'VIDEO' || node.tagName === 'IMG')) {
-
-                        // Find which graph node this belongs to
-                        if (app.graph && app.graph._nodes) {
-                            app.graph._nodes.forEach(graphNode => {
-                                if (graphNode.icy_hidden) {
-                                    updateNodeDOMElements(graphNode, true);
-                                }
-                            });
+        // Initial settings load
+        refreshSettingsCache();
+        
+        // Debounced DOM update function for MutationObserver
+        let domUpdateTimeout = null;
+        const debouncedDOMUpdate = () => {
+            if (domUpdateTimeout) return;
+            domUpdateTimeout = setTimeout(() => {
+                domUpdateTimeout = null;
+                if (app.graph && app.graph._nodes) {
+                    for (let i = 0; i < app.graph._nodes.length; i++) {
+                        const graphNode = app.graph._nodes[i];
+                        if (graphNode.icy_hidden) {
+                            updateNodeDOMElements(graphNode, true);
                         }
                     }
-                });
-            });
+                }
+            }, 50);
+        };
+        
+        // Monitor for dynamically created widgets
+        const observer = new MutationObserver((mutations) => {
+            let hasRelevantChanges = false;
+            for (let i = 0; i < mutations.length; i++) {
+                const mutation = mutations[i];
+                for (let j = 0; j < mutation.addedNodes.length; j++) {
+                    const node = mutation.addedNodes[j];
+                    if (node.nodeType === 1 && (node.tagName === 'TEXTAREA' || node.tagName === 'VIDEO' || node.tagName === 'IMG')) {
+                        hasRelevantChanges = true;
+                        break;
+                    }
+                }
+                if (hasRelevantChanges) break;
+            }
+            
+            if (hasRelevantChanges) {
+                debouncedDOMUpdate();
+            }
         });
         
         // Observe the canvas container
@@ -522,14 +595,13 @@ app.registerExtension({
         // Add CSS for smooth transitions
         const style = document.createElement("style");
         style.textContent = `
-			.graphcanvas textarea,
-			.graphcanvas video,
-			.graphcanvas img,
-			.graphcanvas .comfy-multiline-input {
-				transition: opacity 0.2s ease, filter 0.2s ease;
-			}
-		`;
-
+            .graphcanvas textarea,
+            .graphcanvas video,
+            .graphcanvas img,
+            .graphcanvas .comfy-multiline-input {
+                transition: opacity 0.2s ease, filter 0.2s ease;
+            }
+        `;
 
         document.head.appendChild(style);
     }
